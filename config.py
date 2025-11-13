@@ -10,9 +10,10 @@ class Config:
     MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
     MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
     MINIO_BUCKET = os.getenv("MINIO_BUCKET")
-    RABBITMQ_URL = os.getenv("RABBITMQ_URL")
 
     @staticmethod
     def validate():
-        if not Config.SQLALCHEMY_DATABASE_URI:
-            raise ValueError("DATABASE_URL no está definida en .env")
+        required = ["SQLALCHEMY_DATABASE_URI", "MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_BUCKET"]
+        for var in required:
+            if not getattr(Config, var):
+                raise ValueError(f"{var} no está definida en .env")

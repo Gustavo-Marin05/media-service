@@ -1,36 +1,70 @@
+# app.py
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from config import Config
 from minio import Minio
+from flasgger import Swagger  # ← CORRECTO
 import os
 import uuid
-import pika
-import json
-from strawberry.flask.views import GraphQLView
+from datetime import datetime
 
+# === FLASK APP ===
 app = Flask(__name__)
 app.config.from_object(Config)
 
-# === Validación ===
+# === CORS ===
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+# === VALIDACIÓN DE CONFIG ===
 try:
     Config.validate()
 except Exception as e:
-    print(f"ERROR: {e}")
+    print(f"ERROR DE CONFIGURACIÓN: {e}")
     exit(1)
 
-# === Base de datos ===
+# === SWAGGER CONFIG (CORREGIDO) ===
+swagger_config = {
+    "headers": [],
+    "specs": [
+        {
+            "endpoint": "apispec",
+            "route": "/apispec.json",
+            "rule_filter": lambda rule: True,
+            "model_filter": lambda tag: True,
+        }
+    ],
+    "static_url_path": "/flasgger_static",
+    "swagger_ui": True,
+    "specs_route": "/docs"
+}
+
+template = {
+    "info": {
+        "title": "Media Service API",
+        "version": "1.0.0",
+        "description": "API para subir archivos multimedia. Usa MinIO para almacenamiento y PostgreSQL para metadatos."
+    },
+    "host": "localhost:5000",
+    "basePath": "/",
+    "schemes": ["http"]
+}
+
+swagger = Swagger(app, config=swagger_config, template=template)
+
+# === DATABASE ===
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 
+# === MODELO ===
 class MediaFile(db.Model):
     __tablename__ = 'media_files'
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    post_id = db.Column(db.String(50), nullable=False)
+    post_id = db.Column(db.String(50), nullable=False, default=lambda: str(uuid.uuid4())[:12])
     filename = db.Column(db.String(255), nullable=False)
     file_url = db.Column(db.String(500), nullable=False)
-    uploaded_by = db.Column(db.String(100), nullable=False)
-    uploaded_at = db.Column(db.DateTime, default=db.func.now())
+    uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def to_dict(self):
         return {
@@ -38,101 +72,207 @@ class MediaFile(db.Model):
             "post_id": self.post_id,
             "filename": self.filename,
             "file_url": self.file_url,
-            "uploaded_by": self.uploaded_by,
             "uploaded_at": self.uploaded_at.isoformat()
         }
 
-# === MINIO ===
+# === MINIO CLIENT ===
 minio_client = Minio(
     Config.MINIO_ENDPOINT,
     access_key=Config.MINIO_ACCESS_KEY,
     secret_key=Config.MINIO_SECRET_KEY,
     secure=False
 )
+
 try:
     if not minio_client.bucket_exists(Config.MINIO_BUCKET):
         minio_client.make_bucket(Config.MINIO_BUCKET)
         print(f"Bucket creado: {Config.MINIO_BUCKET}")
+    else:
+        print(f"Bucket existe: {Config.MINIO_BUCKET}")
 except Exception as e:
-    print(f"Error con MinIO: {e}")
+    print(f"ERROR con MinIO: {e}")
     exit(1)
 
-# === RabbitMQ ===
-def publish_media_event(event_type: str, data: dict):
-    try:
-        connection = pika.BlockingConnection(pika.URLParameters(Config.RABBITMQ_URL))
-        channel = connection.channel()
-        channel.queue_declare(queue='media.events', durable=True)
-        message = json.dumps({"event": event_type, "data": data})
-        channel.basic_publish(
-            exchange='',
-            routing_key='media.events',
-            body=message,
-            properties=pika.BasicProperties(delivery_mode=2)
-        )
-        connection.close()
-    except Exception as e:
-        print(f"Error RabbitMQ: {e}")
+# === RUTAS CON DOCUMENTACIÓN CORRECTA (OpenAPI 3) ===
 
-# === RUTAS ===
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"}), 200
+    """Health check del servicio
+    ---
+    responses:
+      200:
+        description: Servicio saludable
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  example: ok
+                service:
+                  type: string
+                  example: media-service
+            examples:
+              default:
+                status: ok
+                service: media-service
+    """
+    print("Health check OK")
+    return jsonify({"status": "ok", "service": "media-service"}), 200
+
 
 @app.route("/media", methods=["POST"])
 def upload_file():
-    username = request.headers.get('X-User')
-    if not username:
-        return jsonify({"error": "Unauthorized"}), 401
-
+    """Subir archivo multimedia
+    ---
+    parameters:
+      - name: file
+        in: formData
+        type: file
+        required: true
+        description: Archivo a subir (imagen, video, etc.)
+    responses:
+      201:
+        description: Archivo subido exitosamente
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                  description: ID único del archivo
+                post_id:
+                  type: string
+                  description: ID corto para relacionar con posts
+                filename:
+                  type: string
+                  description: Nombre único en MinIO
+                file_url:
+                  type: string
+                  description: URL pública del archivo
+                uploaded_at:
+                  type: string
+                  format: date-time
+                  description: Fecha de subida (UTC)
+              required:
+                - id
+                - post_id
+                - filename
+                - file_url
+                - uploaded_at
+            example:
+              id: "a1b2c3d4-e5f6-7890-g1h2-i3j4k5l6m7n8"
+              post_id: "abc123def456"
+              filename: "a1b2c3d4-e5f6-7890-g1h2-i3j4k5l6m7n8.jpg"
+              file_url: "http://localhost:9000/micro-medios/a1b2c3d4-e5f6-7890-g1h2-i3j4k5l6m7n8.jpg"
+              uploaded_at: "2025-04-05T10:00:00"
+      400:
+        description: No se envió archivo
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                error:
+                  type: string
+                  example: No file part
+      500:
+        description: Error interno del servidor
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                error:
+                  type: string
+    """
+    print("POST /media recibido")
+    
     if "file" not in request.files:
+        print("No file part en request")
         return jsonify({"error": "No file part"}), 400
 
     file = request.files["file"]
-    post_id = request.form.get("post_id")
-    if not post_id:
-        return jsonify({"error": "post_id required"}), 400
+    if file.filename == '':
+        print("Filename vacío")
+        return jsonify({"error": "No selected file"}), 400
 
-    ext = file.filename.rsplit('.', 1)[-1] if '.' in file.filename else ''
+    print(f"Archivo recibido: {file.filename}")
+
+    # Generar nombre único
+    ext = file.filename.rsplit('.', 1)[-1].lower() if '.' in file.filename else 'bin'
     unique_filename = f"{uuid.uuid4()}.{ext}"
     temp_path = f"/tmp/{unique_filename}"
-    file.save(temp_path)
+    
+    try:
+        file.save(temp_path)
+        print(f"Guardado temporalmente: {temp_path}")
+    except Exception as e:
+        print(f"Error guardando archivo: {e}")
+        return jsonify({"error": f"Error saving file: {str(e)}"}), 500
 
+    # Subir a MinIO
     try:
         minio_client.fput_object(Config.MINIO_BUCKET, unique_filename, temp_path)
         file_url = f"http://{Config.MINIO_ENDPOINT}/{Config.MINIO_BUCKET}/{unique_filename}"
+        print(f"Subido a MinIO: {file_url}")
     except Exception as e:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        print(f"Error en MinIO: {e}")
+        return jsonify({"error": f"MinIO upload failed: {str(e)}"}), 500
+
+    # Guardar en DB
+    try:
+        media = MediaFile(filename=unique_filename, file_url=file_url)
+        db.session.add(media)
+        db.session.commit()
+        print(f"Media guardado en DB: {media.id}")
+    except Exception as e:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        print(f"Error en DB: {e}")
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+    # Limpiar archivo temporal
+    if os.path.exists(temp_path):
         os.remove(temp_path)
-        return jsonify({"error": "MinIO upload failed"}), 500
 
-    media = MediaFile(
-        post_id=post_id,
-        filename=unique_filename,
-        file_url=file_url,
-        uploaded_by=username
-    )
-    db.session.add(media)
-    db.session.commit()
-
-    publish_media_event("media.uploaded", media.to_dict())
-    os.remove(temp_path)
     return jsonify(media.to_dict()), 201
 
-@app.route("/media", methods=["GET"])
-def list_files():
-    username = request.headers.get('X-User')
-    if not username:
-        return jsonify({"error": "Unauthorized"}), 401
 
-    media_files = MediaFile.query.filter_by(uploaded_by=username).all()
-    return jsonify({
-        "user": username,
-        "media": [m.to_dict() for m in media_files]
-    })
+# === CREAR TABLAS ===
+with app.app_context():
+    try:
+        db.create_all()
+        print("Tablas creadas/verificadas")
+    except Exception as e:
+        print(f"Error creando tablas: {e}")
 
-# === GraphQL ===
-from schema import schema
-app.add_url_rule("/graphql", view_func=GraphQLView.as_view("graphql_view", schema=schema, graphiql=True))
 
+# === GRAPHQL ===
+def setup_graphql():
+    from strawberry.flask.views import GraphQLView
+    from schema import schema
+    
+    app.add_url_rule(
+        "/graphql", 
+        view_func=GraphQLView.as_view("graphql_view", schema=schema, graphiql=True)
+    )
+
+setup_graphql()
+
+
+# === INICIO ===
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=6000, debug=True)
+    print("=" * 60)
+    print("MEDIA SERVICE INICIANDO...")
+    print(f"Swagger UI: http://localhost:5000/docs")
+    print(f"GraphQL:     http://localhost:5000/graphql")
+    print(f"Health:      http://localhost:5000/health")
+    print(f"MinIO:       {Config.MINIO_ENDPOINT}")
+    print(f"DB:          {Config.SQLALCHEMY_DATABASE_URI}")
+    print("=" * 60)
+    app.run(host="0.0.0.0", port=5000, debug=True)
