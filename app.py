@@ -95,7 +95,7 @@ except Exception as e:
 
 # === RUTAS CON DOCUMENTACIÓN CORRECTA (OpenAPI 3) ===
 
-@app.route("/health", methods=["GET"])
+@app.route("/api/health", methods=["GET"])
 def health():
     """Health check del servicio
     ---
@@ -122,7 +122,7 @@ def health():
     return jsonify({"status": "ok", "service": "media-service"}), 200
 
 
-@app.route("/media", methods=["POST"])
+@app.route("/api/media", methods=["POST"])
 def upload_file():
     """Subir archivo multimedia
     ---
