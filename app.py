@@ -6,6 +6,7 @@ from flask_migrate import Migrate
 from config import Config
 from minio import Minio
 from flasgger import Swagger  # ← CORRECTO
+import json 
 import os
 import uuid
 from datetime import datetime
@@ -89,6 +90,25 @@ try:
         print(f"Bucket creado: {Config.MINIO_BUCKET}")
     else:
         print(f"Bucket existe: {Config.MINIO_BUCKET}")
+    
+    # ADD THIS: Set bucket policy to public
+    try:
+        policy = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {"AWS": "*"},
+                    "Action": ["s3:GetObject"],
+                    "Resource": [f"arn:aws:s3:::{Config.MINIO_BUCKET}/*"]
+                }
+            ]
+        }
+        minio_client.set_bucket_policy(Config.MINIO_BUCKET, json.dumps(policy))
+        print(f"Bucket policy set to public for: {Config.MINIO_BUCKET}")
+    except Exception as e:
+        print(f"Warning: Could not set bucket policy: {e}")
+        
 except Exception as e:
     print(f"ERROR con MinIO: {e}")
     exit(1)
@@ -216,7 +236,7 @@ def upload_file():
     # Subir a MinIO
     try:
         minio_client.fput_object(Config.MINIO_BUCKET, unique_filename, temp_path)
-        file_url = f"http://{Config.MINIO_ENDPOINT}/{Config.MINIO_BUCKET}/{unique_filename}"
+        file_url = f"{Config.MINIO_EXTERNAL_URL}/{Config.MINIO_BUCKET}/{unique_filename}"
         print(f"Subido a MinIO: {file_url}")
     except Exception as e:
         if os.path.exists(temp_path):
@@ -242,6 +262,68 @@ def upload_file():
 
     return jsonify(media.to_dict()), 201
 
+    
+@app.route("/api/media/<file_id>", methods=["DELETE"])
+def delete_file(file_id):
+    """Eliminar archivo multimedia
+    ---
+    parameters:
+      - name: file_id
+        in: path
+        type: string
+        required: true
+        description: ID del archivo a eliminar
+    responses:
+      200:
+        description: Archivo eliminado exitosamente
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message:
+                  type: string
+                  example: File deleted successfully
+      404:
+        description: Archivo no encontrado
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                error:
+                  type: string
+                  example: File not found
+      500:
+        description: Error interno del servidor
+    """
+    print(f"DELETE /media/{file_id} recibido")
+    
+    try:
+        # Find the file in database
+        media_file = MediaFile.query.get(file_id)
+        if not media_file:
+            return jsonify({"error": "File not found"}), 404
+
+        # Delete from MinIO
+        try:
+            minio_client.remove_object(Config.MINIO_BUCKET, media_file.filename)
+            print(f"Archivo eliminado de MinIO: {media_file.filename}")
+        except Exception as e:
+            print(f"Error eliminando de MinIO: {e}")
+            # Continue with DB deletion even if MinIO fails
+
+        # Delete from database
+        db.session.delete(media_file)
+        db.session.commit()
+        print(f"Media eliminado de DB: {file_id}")
+
+        return jsonify({"message": "File deleted successfully"}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error eliminando archivo: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 # === CREAR TABLAS ===
 with app.app_context():

@@ -1,4 +1,3 @@
-# config.py
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -10,6 +9,7 @@ class Config:
     MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
     MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
     MINIO_BUCKET = os.getenv("MINIO_BUCKET")
+    MINIO_EXTERNAL_URL = os.getenv("MINIO_EXTERNAL_URL", "http://localhost:9000")  # Add this line
 
     @staticmethod
     def validate():
