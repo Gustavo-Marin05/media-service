@@ -5,11 +5,12 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from config import Config
 from minio import Minio
-from flasgger import Swagger  # ← CORRECTO
+from flasgger import Swagger
 import json 
 import os
 import uuid
 from datetime import datetime
+from typing import List, Dict
 
 # === FLASK APP ===
 app = Flask(__name__)
@@ -25,7 +26,7 @@ except Exception as e:
     print(f"ERROR DE CONFIGURACIÓN: {e}")
     exit(1)
 
-# === SWAGGER CONFIG (CORREGIDO) ===
+# === SWAGGER CONFIG ===
 swagger_config = {
     "headers": [],
     "specs": [
@@ -44,8 +45,8 @@ swagger_config = {
 template = {
     "info": {
         "title": "Media Service API",
-        "version": "1.0.0",
-        "description": "API para subir archivos multimedia. Usa MinIO para almacenamiento y PostgreSQL para metadatos."
+        "version": "2.0.0",
+        "description": "API para subir archivos multimedia con URLs públicas y soporte para posts"
     },
     "host": "localhost:5000",
     "basePath": "/",
@@ -62,7 +63,7 @@ migrate = Migrate(app, db)
 class MediaFile(db.Model):
     __tablename__ = 'media_files'
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    post_id = db.Column(db.String(50), nullable=False, default=lambda: str(uuid.uuid4())[:12])
+    post_id = db.Column(db.String(50), nullable=False, unique=True)
     filename = db.Column(db.String(255), nullable=False)
     file_url = db.Column(db.String(500), nullable=False)
     uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -73,25 +74,26 @@ class MediaFile(db.Model):
             "post_id": self.post_id,
             "filename": self.filename,
             "file_url": self.file_url,
-            "uploaded_at": self.uploaded_at.isoformat()
+            "uploaded_at": self.uploaded_at.isoformat() if self.uploaded_at else None
         }
 
 # === MINIO CLIENT ===
-minio_client = Minio(
-    Config.MINIO_ENDPOINT,
-    access_key=Config.MINIO_ACCESS_KEY,
-    secret_key=Config.MINIO_SECRET_KEY,
-    secure=False
-)
-
 try:
+    minio_client = Minio(
+        Config.MINIO_ENDPOINT,
+        access_key=Config.MINIO_ACCESS_KEY,
+        secret_key=Config.MINIO_SECRET_KEY,
+        secure=False
+    )
+
+    # Check/create bucket
     if not minio_client.bucket_exists(Config.MINIO_BUCKET):
         minio_client.make_bucket(Config.MINIO_BUCKET)
         print(f"Bucket creado: {Config.MINIO_BUCKET}")
     else:
         print(f"Bucket existe: {Config.MINIO_BUCKET}")
     
-    # ADD THIS: Set bucket policy to public
+    # Set bucket policy to PUBLIC - This is the key change!
     try:
         policy = {
             "Version": "2012-10-17",
@@ -99,13 +101,16 @@ try:
                 {
                     "Effect": "Allow",
                     "Principal": {"AWS": "*"},
-                    "Action": ["s3:GetObject"],
+                    "Action": [
+                        "s3:GetObject",
+                        "s3:GetObjectVersion"
+                    ],
                     "Resource": [f"arn:aws:s3:::{Config.MINIO_BUCKET}/*"]
                 }
             ]
         }
         minio_client.set_bucket_policy(Config.MINIO_BUCKET, json.dumps(policy))
-        print(f"Bucket policy set to public for: {Config.MINIO_BUCKET}")
+        print(f"Bucket policy set to PUBLIC for: {Config.MINIO_BUCKET}")
     except Exception as e:
         print(f"Warning: Could not set bucket policy: {e}")
         
@@ -113,113 +118,37 @@ except Exception as e:
     print(f"ERROR con MinIO: {e}")
     exit(1)
 
-# === RUTAS CON DOCUMENTACIÓN CORRECTA (OpenAPI 3) ===
+# === RUTAS ACTUALIZADAS ===
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    """Health check del servicio
-    ---
-    responses:
-      200:
-        description: Servicio saludable
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                status:
-                  type: string
-                  example: ok
-                service:
-                  type: string
-                  example: media-service
-            examples:
-              default:
-                status: ok
-                service: media-service
-    """
-    print("Health check OK")
+    """Health check del servicio"""
     return jsonify({"status": "ok", "service": "media-service"}), 200
 
-
-@app.route("/api/media", methods=["POST"])
-def upload_file():
-    """Subir archivo multimedia
-    ---
-    parameters:
-      - name: file
-        in: formData
-        type: file
-        required: true
-        description: Archivo a subir (imagen, video, etc.)
-    responses:
-      201:
-        description: Archivo subido exitosamente
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                id:
-                  type: string
-                  description: ID único del archivo
-                post_id:
-                  type: string
-                  description: ID corto para relacionar con posts
-                filename:
-                  type: string
-                  description: Nombre único en MinIO
-                file_url:
-                  type: string
-                  description: URL pública del archivo
-                uploaded_at:
-                  type: string
-                  format: date-time
-                  description: Fecha de subida (UTC)
-              required:
-                - id
-                - post_id
-                - filename
-                - file_url
-                - uploaded_at
-            example:
-              id: "a1b2c3d4-e5f6-7890-g1h2-i3j4k5l6m7n8"
-              post_id: "abc123def456"
-              filename: "a1b2c3d4-e5f6-7890-g1h2-i3j4k5l6m7n8.jpg"
-              file_url: "http://localhost:9000/micro-medios/a1b2c3d4-e5f6-7890-g1h2-i3j4k5l6m7n8.jpg"
-              uploaded_at: "2025-04-05T10:00:00"
-      400:
-        description: No se envió archivo
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                error:
-                  type: string
-                  example: No file part
-      500:
-        description: Error interno del servidor
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                error:
-                  type: string
-    """
-    print("POST /media recibido")
+@app.route("/api/media/upload", methods=["POST"])
+def upload_media_for_post():
+    """Subir archivo multimedia para un post específico"""
+    print("POST /api/media/upload recibido")
     
+    # Validar post_id
+    post_id = request.form.get('post_id')
+    if not post_id:
+        return jsonify({"error": "post_id is required"}), 400
+
+    # Verificar si ya existe un archivo para este post_id
+    existing_media = MediaFile.query.filter_by(post_id=post_id).first()
+    if existing_media:
+        return jsonify({"error": f"Media already exists for post_id: {post_id}"}), 409
+
+    # Validar archivo
     if "file" not in request.files:
-        print("No file part en request")
         return jsonify({"error": "No file part"}), 400
 
     file = request.files["file"]
     if file.filename == '':
-        print("Filename vacío")
         return jsonify({"error": "No selected file"}), 400
 
-    print(f"Archivo recibido: {file.filename}")
+    print(f"Subiendo archivo para post_id: {post_id}, archivo: {file.filename}")
 
     # Generar nombre único
     ext = file.filename.rsplit('.', 1)[-1].lower() if '.' in file.filename else 'bin'
@@ -236,6 +165,8 @@ def upload_file():
     # Subir a MinIO
     try:
         minio_client.fput_object(Config.MINIO_BUCKET, unique_filename, temp_path)
+        
+        # Generate PUBLIC URL (no presigned, just the direct URL)
         file_url = f"{Config.MINIO_EXTERNAL_URL}/{Config.MINIO_BUCKET}/{unique_filename}"
         print(f"Subido a MinIO: {file_url}")
     except Exception as e:
@@ -246,10 +177,14 @@ def upload_file():
 
     # Guardar en DB
     try:
-        media = MediaFile(filename=unique_filename, file_url=file_url)
+        media = MediaFile(
+            post_id=post_id,
+            filename=unique_filename,
+            file_url=file_url
+        )
         db.session.add(media)
         db.session.commit()
-        print(f"Media guardado en DB: {media.id}")
+        print(f"Media guardado en DB: {media.id} para post_id: {post_id}")
     except Exception as e:
         if os.path.exists(temp_path):
             os.remove(temp_path)
@@ -262,67 +197,114 @@ def upload_file():
 
     return jsonify(media.to_dict()), 201
 
+@app.route("/api/media/post/<post_id>", methods=["GET"])
+def get_media_by_post_id(post_id):
+    """Obtener información del media por post_id"""
+    print(f"GET /api/media/post/{post_id}")
     
-@app.route("/api/media/<file_id>", methods=["DELETE"])
-def delete_file(file_id):
-    """Eliminar archivo multimedia
-    ---
-    parameters:
-      - name: file_id
-        in: path
-        type: string
-        required: true
-        description: ID del archivo a eliminar
-    responses:
-      200:
-        description: Archivo eliminado exitosamente
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                message:
-                  type: string
-                  example: File deleted successfully
-      404:
-        description: Archivo no encontrado
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                error:
-                  type: string
-                  example: File not found
-      500:
-        description: Error interno del servidor
-    """
-    print(f"DELETE /media/{file_id} recibido")
-    
-    try:
-        # Find the file in database
-        media_file = MediaFile.query.get(file_id)
-        if not media_file:
-            return jsonify({"error": "File not found"}), 404
+    media_file = MediaFile.query.filter_by(post_id=post_id).first()
+    if not media_file:
+        return jsonify({"error": "Media not found for this post_id"}), 404
 
-        # Delete from MinIO
+    return jsonify(media_file.to_dict()), 200
+
+@app.route("/api/media/batch", methods=["POST"])
+def get_batch_media():
+    """Obtener información de múltiples medias por post_ids"""
+    print("POST /api/media/batch")
+    
+    data = request.get_json()
+    if not data or 'post_ids' not in data:
+        return jsonify({"error": "post_ids array is required"}), 400
+
+    post_ids = data.get('post_ids', [])
+
+    if not isinstance(post_ids, list):
+        return jsonify({"error": "post_ids must be an array"}), 400
+
+    print(f"Buscando {len(post_ids)} archivos")
+
+    # Buscar todos los archivos en una sola consulta
+    media_files = MediaFile.query.filter(MediaFile.post_id.in_(post_ids)).all()
+    
+    results = []
+    for media in media_files:
+        results.append(media.to_dict())
+
+    # Identificar post_ids no encontrados
+    found_post_ids = {media.post_id for media in media_files}
+    not_found = [pid for pid in post_ids if pid not in found_post_ids]
+
+    return jsonify({
+        "found": results,
+        "not_found": not_found,
+        "total_requested": len(post_ids),
+        "total_found": len(results)
+    }), 200
+
+@app.route("/api/media/post/<post_id>", methods=["DELETE"])
+def delete_media_by_post_id(post_id):
+    """Eliminar archivo multimedia por post_id"""
+    print(f"DELETE /api/media/post/{post_id}")
+    
+    media_file = MediaFile.query.filter_by(post_id=post_id).first()
+    if not media_file:
+        return jsonify({"error": "Media not found for this post_id"}), 404
+
+    try:
+        # Eliminar de MinIO
         try:
             minio_client.remove_object(Config.MINIO_BUCKET, media_file.filename)
             print(f"Archivo eliminado de MinIO: {media_file.filename}")
         except Exception as e:
             print(f"Error eliminando de MinIO: {e}")
-            # Continue with DB deletion even if MinIO fails
 
-        # Delete from database
+        # Eliminar de la base de datos
         db.session.delete(media_file)
         db.session.commit()
-        print(f"Media eliminado de DB: {file_id}")
+        print(f"Media eliminado de DB para post_id: {post_id}")
 
         return jsonify({"message": "File deleted successfully"}), 200
 
     except Exception as e:
         db.session.rollback()
         print(f"Error eliminando archivo: {e}")
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+# Mantener endpoints legacy para compatibilidad
+@app.route("/api/media", methods=["POST"])
+def upload_file():
+    """Subir archivo multimedia (endpoint legacy)"""
+    if "file" not in request.files:
+        return jsonify({"error": "No file part"}), 400
+
+    file = request.files["file"]
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+
+    # Generar un post_id automático para compatibilidad
+    auto_post_id = str(uuid.uuid4())[:12]
+    
+    # Usar la nueva función de upload
+    request.form = request.form.copy()
+    request.form['post_id'] = auto_post_id
+    
+    return upload_media_for_post()
+
+@app.route("/api/media/<file_id>", methods=["DELETE"])
+def delete_file(file_id):
+    """Eliminar archivo multimedia por ID (endpoint legacy)"""
+    media_file = MediaFile.query.get(file_id)
+    if not media_file:
+        return jsonify({"error": "File not found"}), 404
+
+    try:
+        minio_client.remove_object(Config.MINIO_BUCKET, media_file.filename)
+        db.session.delete(media_file)
+        db.session.commit()
+        return jsonify({"message": "File deleted successfully"}), 200
+    except Exception as e:
+        db.session.rollback()
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 # === CREAR TABLAS ===
@@ -332,7 +314,6 @@ with app.app_context():
         print("Tablas creadas/verificadas")
     except Exception as e:
         print(f"Error creando tablas: {e}")
-
 
 # === GRAPHQL ===
 def setup_graphql():
@@ -346,15 +327,15 @@ def setup_graphql():
 
 setup_graphql()
 
-
 # === INICIO ===
 if __name__ == "__main__":
     print("=" * 60)
-    print("MEDIA SERVICE INICIANDO...")
-    print(f"Swagger UI: http://localhost:5000/docs")
-    print(f"GraphQL:     http://localhost:5000/graphql")
-    print(f"Health:      http://localhost:5000/health")
-    print(f"MinIO:       {Config.MINIO_ENDPOINT}")
-    print(f"DB:          {Config.SQLALCHEMY_DATABASE_URI}")
+    print("MEDIA SERVICE v2.0 SIMPLIFICADO INICIANDO...")
+    print("URLS PÚBLICAS - SIN PRESIGNED")
+    print("ENDPOINTS:")
+    print("  POST   /api/media/upload    - Subir archivo con post_id")
+    print("  POST   /api/media/batch     - Obtener múltiples medias")
+    print("  GET    /api/media/post/<id> - Obtener media por post_id")
+    print("  DELETE /api/media/post/<id> - Eliminar media por post_id")
     print("=" * 60)
     app.run(host="0.0.0.0", port=5000, debug=True)
